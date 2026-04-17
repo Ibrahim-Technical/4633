@@ -1,112 +1,96 @@
 #include "mbed.h"
 #include "rtos.h"
 
-Serial      pc(USBTX, USBRX);
-AnalogOut   aout(p18);
-AnalogIn    ain(p15);
-Thread      rt_speed;
+Serial pc(USBTX, USBRX);
+AnalogOut aout(p18);
+AnalogIn ain(p15);
 
-volatile float g_setpoint_rpm = 0.0f;
-volatile float g_meas_rpm     = 0.0f;
+Thread rt_thread;
 
-// ── Constants ──────────────────────────────────────────────────────────────────
-const float Ts = 0.02f;    // 20ms sampling period
-const float fc = 5.0f;     // LPF cutoff frequency (Hz)
 
-// ── PID Gains ──────────────────────────────────────────────────────────────────
-float Kp = 0.02f;
+float setpoint_rpm = 0.0f;
+
+
+float adc_raw = 0.0f;
+float sensor_voltage = 0.0f;
+float speed_rpm = 0.0f;
+float filt_speed_rpm = 0.0f;
+
+
+float error_rpm = 0.0f;
+float integral_error = 0.0f;
+float derivative_error = 0.0f;
+float prev_error_rpm = 0.0f;
+
+
+float Kp = 0.003f;
 float Ki = 0.001f;
-float Kd = 0.0f;
+float Kd = 0.0001f;
 
-// ── rpm → DAC ──────────────────────────────────────────────────────────────────
-float rpm_to_dac(float rpm) {
-    float val = 0.5f + rpm / (2.0f * 80.0f);
-    if (val < 0.0f) val = 0.0f;
-    if (val > 1.0f) val = 1.0f;
-    return val;
-}
 
-// ── ADC → rpm ──────────────────────────────────────────────────────────────────
-float adc_to_rpm(float raw) {
-    float voltage = (raw - 0.5f) * 20.0f;
-    float rpm     = voltage * (80.0f / 7.0f);
-    return rpm;
-}
+float control_u = 0.5f;
 
-// ── RT Task ────────────────────────────────────────────────────────────────────
-void rt_speed_thread() {
-    float V_prev   = 0.0f;
-    float e_prev   = 0.0f;
-    float integral = 0.0f;
 
-    float alpha = Ts / (Ts + 1.0f / (2.0f * 3.14159f * fc));
+float prev_input_speed_rpm = 0.0f;
 
-    while (true) {
+void rt_motor_thread() {
+    const float Ts = 0.02f;   // 20 ms
+    const float fc = 2.0f;
+    const float alpha = Ts / (Ts + 1.0f / (2.0f * 3.14159f * fc));
 
-        // 1. Sample ADC
-        float raw = ain.read();
+    while (1) {
+        
+        adc_raw = ain.read();
 
-        // 2. Low pass filter
-        float V_filt = alpha * raw + (1.0f - alpha) * V_prev;
-        V_prev = raw;
+        
+        sensor_voltage = adc_raw * 20.0f - 10.0f;
 
-        // 3. Convert to RPM
-        float meas_rpm = adc_to_rpm(V_filt);
-        g_meas_rpm = meas_rpm;
+        
+        speed_rpm = sensor_voltage * (80.0f / 7.0f);
 
-        // 4. PID ───────────────────────────────────────────────────────────────
+        
+        filt_speed_rpm = alpha * speed_rpm + (1.0f - alpha) * prev_input_speed_rpm;
+        prev_input_speed_rpm = speed_rpm;
 
-        // Error
-        float e = g_setpoint_rpm - meas_rpm;
+        
+        error_rpm = setpoint_rpm - filt_speed_rpm;
 
-        // Integral term
-        integral += Ts * e;
+        
+        integral_error = integral_error + Ts * error_rpm;
 
-        // Anti-windup: clamp integral so it doesn't grow unbounded
-        if (integral >  1.0f) integral =  1.0f;
-        if (integral < -1.0f) integral = -1.0f;
+        
+        derivative_error = (error_rpm - prev_error_rpm) / Ts;
 
-        // Derivative term
-        float deriv = (e - e_prev) / Ts;
-        e_prev = e;
+        
+        control_u = Kp * error_rpm + Ki * integral_error + Kd * derivative_error;
 
-        // PID output
-        float u = Kp * e + Ki * integral + Kd * deriv;
+        
+        control_u = 0.5f + control_u;
 
-        // 5. Clamp u to valid DAC range [0,1] then write to motor
-        float dac = 0.5f + u;
-        if (dac > 1.0f) dac = 1.0f;
-        if (dac < 0.0f) dac = 0.0f;
-        aout.write(dac);
+       
+        if (control_u > 1.0f) control_u = 1.0f;
+        if (control_u < 0.0f) control_u = 0.0f;
+
+        
+        aout.write(control_u);
+
+        
+        prev_error_rpm = error_rpm;
 
         ThisThread::sleep_for(20);
     }
 }
 
-// ── Main ───────────────────────────────────────────────────────────────────────
 int main() {
     pc.baud(9600);
-    aout.write(0.5f);   // start stationary
 
-    rt_speed.start(rt_speed_thread);
+    rt_thread.start(rt_motor_thread);
 
-    pc.printf("=== Closed Loop Motor Speed Control ===\r\n");
-    pc.printf("Enter desired speed in RPM (-80 to 80):\r\n");
-
-    while (true) {
-        float setpoint_rpm = 0.0f;
-
-        pc.printf("\r\nEnter RPM: ");
+    while (1) {
+        pc.printf("Enter setpoint speed (rpm): \r\n");
         pc.scanf("%f", &setpoint_rpm);
 
-        if (setpoint_rpm >  80.0f) setpoint_rpm =  80.0f;
-        if (setpoint_rpm < -80.0f) setpoint_rpm = -80.0f;
-
-        g_setpoint_rpm = setpoint_rpm;
-
-        ThisThread::sleep_for(500);
-
-        pc.printf("Setpoint : %.2f rpm\r\n", g_setpoint_rpm);
-        pc.printf("Measured : %.2f rpm\r\n", g_meas_rpm);
+        pc.printf("Setpoint = %.2f rpm, Measured = %.2f rpm, Control = %.3f\r\n\r\n",
+                  setpoint_rpm, filt_speed_rpm, control_u);
     }
 }
