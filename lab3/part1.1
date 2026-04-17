@@ -1,0 +1,24 @@
+#include "mbed.h"
+#include "rtos.h"
+
+Serial pc(USBTX, USBRX);
+
+int main() {
+    pc.baud(9600);
+    
+    float setpoint_rpm = 0.0f;
+    
+    pc.printf("=== Motor Speed Control ===\r\n");
+    pc.printf("Enter desired motor speed in RPM (-80 to 80):\r\n");
+    
+    while (true) {
+        pc.printf("\r\nEnter RPM: ");
+        pc.scanf("%f", &setpoint_rpm);
+        
+        // Clamp to valid motor range
+        if (setpoint_rpm > 80.0f)  setpoint_rpm = 80.0f;
+        if (setpoint_rpm < -80.0f) setpoint_rpm = -80.0f;
+        
+        pc.printf("Setpoint set to: %.2f rpm\r\n", setpoint_rpm);
+    }
+}

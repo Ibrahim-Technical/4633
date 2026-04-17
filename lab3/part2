@@ -1,0 +1,178 @@
+#include "mbed.h"
+#include "rtos.h"
+
+Serial      pc(USBTX, USBRX);
+AnalogOut   aout(p18);
+AnalogIn    ain(p15);
+Thread      rt_speed;
+
+volatile float g_setpoint_rpm = 0.0f;
+volatile float g_meas_rpm     = 0.0f;
+
+// ── Constants ──────────────────────────────────────────────────────────────────
+const float Ts = 0.02f;
+const float fc = 5.0f;
+
+// ── PID Gains (now volatile so keyboard can update them safely) ────────────────
+volatile float Kp = 0.02f;
+volatile float Ki = 0.001f;
+volatile float Kd = 0.0f;
+
+// ── rpm → DAC ──────────────────────────────────────────────────────────────────
+float rpm_to_dac(float rpm) {
+    float val = 0.5f + rpm / (2.0f * 80.0f);
+    if (val < 0.0f) val = 0.0f;
+    if (val > 1.0f) val = 1.0f;
+    return val;
+}
+
+// ── ADC → rpm ──────────────────────────────────────────────────────────────────
+float adc_to_rpm(float raw) {
+    float voltage = (raw - 0.5f) * 20.0f;
+    float rpm     = voltage * (80.0f / 7.0f);
+    return rpm;
+}
+
+// ── RT Task ────────────────────────────────────────────────────────────────────
+void rt_speed_thread() {
+    float V_prev   = 0.0f;
+    float e_prev   = 0.0f;
+    float integral = 0.0f;
+
+    float alpha = Ts / (Ts + 1.0f / (2.0f * 3.14159f * fc));
+
+    while (true) {
+
+        // 1. Sample ADC
+        float raw = ain.read();
+
+        // 2. Low pass filter
+        float V_filt = alpha * raw + (1.0f - alpha) * V_prev;
+        V_prev = raw;
+
+        // 3. Convert to RPM
+        float meas_rpm = adc_to_rpm(V_filt);
+        g_meas_rpm = meas_rpm;
+
+        // 4. PID
+        float e    = g_setpoint_rpm - meas_rpm;
+        integral  += Ts * e;
+
+        // Anti-windup
+        if (integral >  1.0f) integral =  1.0f;
+        if (integral < -1.0f) integral = -1.0f;
+
+        float deriv = (e - e_prev) / Ts;
+        e_prev = e;
+
+        float u = Kp * e + Ki * integral + Kd * deriv;
+
+        // 5. Write to DAC
+        float dac = 0.5f + u;
+        if (dac > 1.0f) dac = 1.0f;
+        if (dac < 0.0f) dac = 0.0f;
+        aout.write(dac);
+
+        ThisThread::sleep_for(20);
+    }
+}
+
+// ── Print Menu ─────────────────────────────────────────────────────────────────
+void print_menu() {
+    pc.printf("\r\n=============================\r\n");
+    pc.printf("  Motor Speed Control Menu  \r\n");
+    pc.printf("=============================\r\n");
+    pc.printf("  1. Set target RPM\r\n");
+    pc.printf("  2. Set Kp\r\n");
+    pc.printf("  3. Set Ki\r\n");
+    pc.printf("  4. Set Kd\r\n");
+    pc.printf("  5. Show current status\r\n");
+    pc.printf("  0. Stop motor\r\n");
+    pc.printf("=============================\r\n");
+    pc.printf("Choice: ");
+}
+
+// ── Print Status ───────────────────────────────────────────────────────────────
+void print_status() {
+    pc.printf("\r\n--- Current Status ---\r\n");
+    pc.printf("  Setpoint : %.2f rpm\r\n", g_setpoint_rpm);
+    pc.printf("  Measured : %.2f rpm\r\n", g_meas_rpm);
+    pc.printf("  Kp       : %.4f\r\n",     Kp);
+    pc.printf("  Ki       : %.4f\r\n",     Ki);
+    pc.printf("  Kd       : %.4f\r\n",     Kd);
+    pc.printf("----------------------\r\n");
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
+int main() {
+    pc.baud(9600);
+    aout.write(0.5f);   // start stationary
+
+    rt_speed.start(rt_speed_thread);
+
+    while (true) {
+        print_menu();
+
+        int choice = 0;
+        pc.scanf("%d", &choice);
+
+        switch (choice) {
+
+            case 1: {
+                float rpm = 0.0f;
+                pc.printf("Enter RPM (-80 to 80): ");
+                pc.scanf("%f", &rpm);
+                if (rpm >  80.0f) rpm =  80.0f;
+                if (rpm < -80.0f) rpm = -80.0f;
+                g_setpoint_rpm = rpm;
+                pc.printf("Setpoint set to: %.2f rpm\r\n", g_setpoint_rpm);
+                break;
+            }
+
+            case 2: {
+                float val = 0.0f;
+                pc.printf("Enter Kp (current=%.4f): ", Kp);
+                pc.scanf("%f", &val);
+                Kp = val;
+                pc.printf("Kp updated to: %.4f\r\n", Kp);
+                break;
+            }
+
+            case 3: {
+                float val = 0.0f;
+                pc.printf("Enter Ki (current=%.4f): ", Ki);
+                pc.scanf("%f", &val);
+                Ki = val;
+                pc.printf("Ki updated to: %.4f\r\n", Ki);
+                break;
+            }
+
+            case 4: {
+                float val = 0.0f;
+                pc.printf("Enter Kd (current=%.4f): ", Kd);
+                pc.scanf("%f", &val);
+                Kd = val;
+                pc.printf("Kd updated to: %.4f\r\n", Kd);
+                break;
+            }
+
+            case 5: {
+                print_status();
+                break;
+            }
+
+            case 0: {
+                g_setpoint_rpm = 0.0f;
+                pc.printf("Motor stopped.\r\n");
+                break;
+            }
+
+            default: {
+                pc.printf("Invalid choice, try again.\r\n");
+                break;
+            }
+        }
+
+        ThisThread::sleep_for(500);
+    }
+}

@@ -1,0 +1,54 @@
+#include "mbed.h"
+#include "rtos.h"
+
+Serial      pc(USBTX, USBRX);
+AnalogOut   aout(p18);
+
+Thread rt_speed;
+
+volatile float g_setpoint_rpm = 0.0f;  // shared between main and RT task
+
+// Convert rpm → D/A value [0, 1]
+// -80 rpm = 0.0,  0 rpm = 0.5,  +80 rpm = 1.0
+float rpm_to_dac(float rpm) {
+    float val = 0.5f + rpm / (2.0f * 80.0f);
+    if (val < 0.0f) val = 0.0f;
+    if (val > 1.0f) val = 1.0f;
+    return val;
+}
+
+void rt_speed_thread() {
+    while (true) {
+        float u = rpm_to_dac(g_setpoint_rpm);
+        aout.write(u);
+        ThisThread::sleep_for(20);  // runs every 20ms
+    }
+}
+
+int main() {
+    pc.baud(9600);
+
+    // Start motor stationary
+    aout.write(0.5f);
+
+    rt_speed.start(rt_speed_thread);
+
+    pc.printf("=== Motor Speed Control ===\r\n");
+    pc.printf("Enter desired speed in RPM (-80 to 80):\r\n");
+
+    while (true) {
+        float setpoint_rpm = 0.0f;
+
+        pc.printf("\r\nEnter RPM: ");
+        pc.scanf("%f", &setpoint_rpm);
+
+        // Clamp to valid range
+        if (setpoint_rpm >  80.0f) setpoint_rpm =  80.0f;
+        if (setpoint_rpm < -80.0f) setpoint_rpm = -80.0f;
+
+        g_setpoint_rpm = setpoint_rpm;
+
+        pc.printf("Setpoint set to: %.2f rpm  |  DAC value: %.3f\r\n",
+                  g_setpoint_rpm, rpm_to_dac(g_setpoint_rpm));
+    }
+}

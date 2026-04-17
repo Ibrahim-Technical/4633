@@ -1,0 +1,82 @@
+#include "mbed.h"
+#include "rtos.h"
+
+Serial      pc(USBTX, USBRX);
+AnalogOut   aout(p18);
+AnalogIn    ain(p15);
+
+Thread rt_speed;
+
+volatile float g_setpoint_rpm = 0.0f;
+volatile float g_meas_rpm     = 0.0f;  // filtered measured speed
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const float Ts  = 0.02f;   // sampling period (20ms → 50Hz)
+const float fc  = 5.0f;    // LPF cutoff frequency (Hz)
+
+// ── Convert rpm → DAC [0,1] ───────────────────────────────────────────────────
+float rpm_to_dac(float rpm) {
+    float val = 0.5f + rpm / (2.0f * 80.0f);
+    if (val < 0.0f) val = 0.0f;
+    if (val > 1.0f) val = 1.0f;
+    return val;
+}
+
+// ── Convert ADC [0,1] → rpm ───────────────────────────────────────────────────
+// ADC 0→1 = -10V→+10V
+// Sensor -7V→+7V = -80→+80 rpm
+float adc_to_rpm(float raw) {
+    float voltage = (raw - 0.5f) * 20.0f;       // → [-10, +10] V
+    float rpm     = voltage * (80.0f / 7.0f);    // → [-80, +80] rpm
+    return rpm;
+}
+
+void rt_speed_thread() {
+    float V_prev = 0.0f;   // previous raw ADC sample (for LPF)
+
+    // Compute alpha once (stays constant since Ts and fc are fixed)
+    float alpha = Ts / (Ts + 1.0f / (2.0f * 3.14159f * fc));
+
+    while (true) {
+        // ── 1. Sample A/D ────────────────────────────────────────────────────
+        float raw = ain.read();
+
+        // ── 2. Low-pass filter ────────────────────────────────────────────────
+        // V_filt[n] = alpha * V_in[n] + (1 - alpha) * V_in[n-1]
+        float V_filt = alpha * raw + (1.0f - alpha) * V_prev;
+        V_prev = raw;   // store unfiltered sample for next iteration
+
+        // ── 3. Scale to RPM and share with main ───────────────────────────────
+        g_meas_rpm = adc_to_rpm(V_filt);
+
+        // ── 4. Write DAC (open loop for now) ──────────────────────────────────
+        aout.write(rpm_to_dac(g_setpoint_rpm));
+
+        ThisThread::sleep_for(20);
+    }
+}
+
+int main() {
+    pc.baud(9600);
+    aout.write(0.5f);   // start stationary
+
+    rt_speed.start(rt_speed_thread);
+
+    pc.printf("=== Motor Speed Control ===\r\n");
+    pc.printf("Enter desired speed in RPM (-80 to 80):\r\n");
+
+    while (true) {
+        float setpoint_rpm = 0.0f;
+
+        pc.printf("\r\nEnter RPM: ");
+        pc.scanf("%f", &setpoint_rpm);
+
+        if (setpoint_rpm >  80.0f) setpoint_rpm =  80.0f;
+        if (setpoint_rpm < -80.0f) setpoint_rpm = -80.0f;
+
+        g_setpoint_rpm = setpoint_rpm;
+
+        pc.printf("Setpoint : %.2f rpm\r\n", g_setpoint_rpm);
+        pc.printf("Measured : %.2f rpm\r\n", g_meas_rpm);
+    }
+}
