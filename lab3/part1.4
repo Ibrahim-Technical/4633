@@ -4,93 +4,102 @@
 Serial pc(USBTX, USBRX);
 AnalogOut aout(p18);
 AnalogIn ain(p15);
-
 Thread rt_thread;
 
-
-float setpoint_rpm = 0.0f;
-
-
-float adc_raw = 0.0f;
-float sensor_voltage = 0.0f;
-float speed_rpm = 0.0f;
-float filt_speed_rpm = 0.0f;
-
-
-float error_rpm = 0.0f;
-float integral_error = 0.0f;
-float derivative_error = 0.0f;
-float prev_error_rpm = 0.0f;
-
-
-float Kp = 0.003f;
-float Ki = 0.001f;
-float Kd = 0.0001f;
-
-
-float control_u = 0.5f;
-
-
+float setpoint_rpm        = 0.0f;
+float adc_raw             = 0.0f;
+float sensor_voltage      = 0.0f;
+float speed_rpm           = 0.0f;
+float filt_speed_rpm      = 0.0f;
+float error_rpm           = 0.0f;
+float integral_error      = 0.0f;
+float derivative_error    = 0.0f;
+float prev_error_rpm      = 0.0f;
+float Kp                  = 0.003f;
+float Ki                  = 0.001f;
+float Kd                  = 0.0001f;
+float control_u           = 0.5f;
 float prev_input_speed_rpm = 0.0f;
 
 void rt_motor_thread() {
-    const float Ts = 0.02f;   // 20 ms
-    const float fc = 2.0f;
+    const float Ts    = 0.02f;
+    const float fc    = 2.0f;
     const float alpha = Ts / (Ts + 1.0f / (2.0f * 3.14159f * fc));
 
     while (1) {
-        
-        adc_raw = ain.read();
-
-        
+        adc_raw        = ain.read();
         sensor_voltage = adc_raw * 20.0f - 10.0f;
+        speed_rpm      = sensor_voltage * (80.0f / 7.0f);
 
-        
-        speed_rpm = sensor_voltage * (80.0f / 7.0f);
+        filt_speed_rpm        = alpha * speed_rpm + (1.0f - alpha) * prev_input_speed_rpm;
+        prev_input_speed_rpm  = speed_rpm;
 
-        
-        filt_speed_rpm = alpha * speed_rpm + (1.0f - alpha) * prev_input_speed_rpm;
-        prev_input_speed_rpm = speed_rpm;
-
-        
-        error_rpm = setpoint_rpm - filt_speed_rpm;
-
-        
+        error_rpm      = setpoint_rpm - filt_speed_rpm;
         integral_error = integral_error + Ts * error_rpm;
-
-        
         derivative_error = (error_rpm - prev_error_rpm) / Ts;
 
-        
         control_u = Kp * error_rpm + Ki * integral_error + Kd * derivative_error;
-
-        
         control_u = 0.5f + control_u;
 
-       
         if (control_u > 1.0f) control_u = 1.0f;
         if (control_u < 0.0f) control_u = 0.0f;
 
-        
         aout.write(control_u);
 
-        
         prev_error_rpm = error_rpm;
-
         ThisThread::sleep_for(20);
     }
 }
 
 int main() {
     pc.baud(9600);
-
     rt_thread.start(rt_motor_thread);
 
     while (1) {
-        pc.printf("Enter setpoint speed (rpm): \r\n");
-        pc.scanf("%f", &setpoint_rpm);
+        pc.printf("\r\n=== Menu ===\r\n");
+        pc.printf("1. Set RPM\r\n");
+        pc.printf("2. Set Kp (%.4f)\r\n", Kp);
+        pc.printf("3. Set Ki (%.4f)\r\n", Ki);
+        pc.printf("4. Set Kd (%.4f)\r\n", Kd);
+        pc.printf("5. Status\r\n");
+        pc.printf("0. Stop motor\r\n");
+        pc.printf("Choice: ");
 
-        pc.printf("Setpoint = %.2f rpm, Measured = %.2f rpm, Control = %.3f\r\n\r\n",
-                  setpoint_rpm, filt_speed_rpm, control_u);
+        int choice;
+        pc.scanf("%d", &choice);
+
+        if (choice == 1) {
+            pc.printf("Enter RPM (-80 to 80): ");
+            pc.scanf("%f", &setpoint_rpm);
+            if (setpoint_rpm >  80.0f) setpoint_rpm =  80.0f;
+            if (setpoint_rpm < -80.0f) setpoint_rpm = -80.0f;
+            pc.printf("Setpoint = %.2f rpm\r\n", setpoint_rpm);
+
+        } else if (choice == 2) {
+            pc.printf("Enter Kp (current=%.4f): ", Kp);
+            pc.scanf("%f", &Kp);
+            pc.printf("Kp = %.4f\r\n", Kp);
+
+        } else if (choice == 3) {
+            pc.printf("Enter Ki (current=%.4f): ", Ki);
+            pc.scanf("%f", &Ki);
+            integral_error = 0.0f;  // reset integral when Ki changes
+            pc.printf("Ki = %.4f\r\n", Ki);
+
+        } else if (choice == 4) {
+            pc.printf("Enter Kd (current=%.4f): ", Kd);
+            pc.scanf("%f", &Kd);
+            pc.printf("Kd = %.4f\r\n", Kd);
+
+        } else if (choice == 5) {
+            pc.printf("Setpoint = %.2f rpm\r\n", setpoint_rpm);
+            pc.printf("Measured = %.2f rpm\r\n", filt_speed_rpm);
+            pc.printf("Kp=%.4f  Ki=%.4f  Kd=%.4f\r\n", Kp, Ki, Kd);
+
+        } else if (choice == 0) {
+            setpoint_rpm   = 0.0f;
+            integral_error = 0.0f;
+            pc.printf("Motor stopped.\r\n");
+        }
     }
 }
